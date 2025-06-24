@@ -1,0 +1,64 @@
+{
+  "best_params": {
+    "sample_rate": 8000,
+    "n_fft": 2048,
+    "window": "hann",
+    "n_lfcc": 80,
+    "n_mfcc": 20,
+    "n_mels": 256,
+    "hop_length": 1536
+  },
+  "best_score": 0.7031052529759906,
+  "optimization_settings": {
+    "scoring_weights": {
+      "statistical_discrimination": 0.15,
+      "visual_discriminability": 0.7,
+      "pattern_consistency": 0.15
+    },
+    "parameter_grid": {
+      "sample_rate": [
+        8000,
+        16000,
+        44100,
+        48000
+      ],
+      "n_fft": [
+        128,
+        256,
+        512,
+        1024,
+        2048
+      ],
+      "hop_length_ratio": [
+        0.25,
+        0.5,
+        0.75
+      ],
+      "window": [
+        "hann",
+        "hamming",
+        "blackman"
+      ],
+      "n_lfcc": [
+        20,
+        40,
+        60,
+        80,
+        100
+      ],
+      "n_mfcc": [
+        13,
+        20,
+        26,
+        39
+      ],
+      "n_mels": [
+        40,
+        64,
+        80,
+        128,
+        256
+      ]
+    }
+  }
+}

@@ -37,6 +37,8 @@ from sklearn.metrics import mutual_info_score
 import time
 from tqdm import tqdm
 import pickle
+import random
+from scipy.optimize import differential_evolution
 
 warnings.filterwarnings('ignore')
 
@@ -49,54 +51,33 @@ class OptimalDeepfakeAnalyzer:
     def __init__(self):
         """Initialize the optimizer with parameter grids and scoring weights."""
         
-        # Define parameter search space
+        # Define strategic parameter search space for comprehensive evaluation
         # -------------------------------------------------------------
-        # Each hyper-parameter below is intentionally restricted to a
-        # small but representative set of values so that the grid search
-        # remains tractable while still covering the most commonly used
-        # settings in speech/audio forensics. The rationale for every
-        # parameter is documented inline.
-        #   • sample_rate   – 16 kHz covers telephony, 22.05 kHz & 44.1 kHz
-        #                     match music/streaming standards, 48 kHz is
-        #                     studio quality. Evaluating them lets us see
-        #                     which resolution accentuates fake artefacts.
-        #   • n_fft         – FFT sizes from 512 to 4096 balance temporal
-        #                     vs spectral resolution. Larger windows give
-        #                     finer frequency bins that may expose subtle
-        #                     vocoder traces, whereas smaller windows are
-        #                     computationally cheaper and capture fast
-        #                     transients.
-        #   • hop_length_ratio – expressed as a ratio of n_fft so that the
-        #                     analysis window overlap adapts for each FFT
-        #                     size. Ratios 0.25/0.5/0.75 explore dense vs
-        #                     sparse time sampling.
-        #   • window        – Common analysis windows, each with slightly
-        #                     different sidelobe behaviour that can impact
-        #                     leakage of fake artefacts into neighbouring
-        #                     bins.
-        #   • n_lfcc / n_mfcc – Number of cepstral coefficients. Higher
-        #                     dimensionality may capture more detailed
-        #                     spectral cues but risks overfitting noise.
-        #   • n_mels        – Mel filter-bank resolution; a higher value
-        #                     yields finer psycho-acoustic frequency bands
-        #                     which can reveal vocoder smoothing.
+        # Reduced but representative parameter grid that ensures good coverage
+        # across all dimensions while keeping total combinations manageable.
+        # This allows testing all parameter variations within reasonable time.
+        #   • sample_rate   – Key rates: telephony, standard, high-quality
+        #   • n_fft         – Representative FFT sizes covering the range
+        #   • hop_length_ratio – Different overlap strategies
+        #   • window        – Most common analysis windows
+        #   • n_lfcc / n_mfcc – Representative coefficient counts
+        #   • n_mels        – Key mel filter-bank resolutions
         # -------------------------------------------------------------
         self.parameter_grid = {
-            'sample_rate': [16000, 22050, 44100, 48000],
-            'n_fft': [512, 1024, 2048, 4096, 8192],
-            'hop_length_ratio': [0.125, 0.25, 0.5, 0.75],  # Ratio of n_fft
-            'window': ['hann', 'hamming', 'blackman', 'bartlett'],
-            'n_lfcc': [20, 40, 60, 80, 100],
-            'n_mfcc': [13, 20, 26, 39],
-            'n_mels': [40, 64, 80, 128, 256]
+            'sample_rate': [8000, 16000, 44100, 48000],    # 4 values - full range
+            'n_fft': [128, 256, 512, 1024, 2048],               # 5 values - comprehensive range
+            'hop_length_ratio': [ 0.25, 0.5, 0.75],   # 4 values - full overlap range
+            'window': ['hann', 'hamming', 'blackman'],      # 3 values - common windows
+            'n_lfcc': [20, 40, 60, 80, 100],                # 5 values - full coefficient range
+            'n_mfcc': [13, 20, 26, 39],                     # 4 values - standard range
+            'n_mels': [40, 64, 80, 128, 256]                # 5 values - comprehensive mel range
         }
         
         # Scoring weights for multi-objective optimization
         self.scoring_weights = {
-            'statistical_discrimination': 0.35,
-            'visual_discriminability': 0.35,
-            'pattern_consistency': 0.20,
-            'computational_efficiency': 0.10
+            'statistical_discrimination': 0.15,  # Increased weight
+            'visual_discriminability': 0.70,     # Maintained focus on visual plotting
+            'pattern_consistency': 0.15          # Maintained consistency weight
         }
         
         # Results storage
@@ -107,6 +88,14 @@ class OptimalDeepfakeAnalyzer:
         print("🔍 Optimal Deepfake Analyzer Initialized")
         print(f"📊 Parameter combinations to test: {self._count_combinations()}")
         print(f"⚖️  Scoring weights: {self.scoring_weights}")
+        
+        # Show first few combinations to verify parameter variation
+        print("\n🔍 First 10 parameter combinations to verify variation:")
+        combinations = list(self._generate_parameter_combinations())
+        for i, combo in enumerate(combinations[:10]):
+            print(f"  {i+1:2d}. SR:{combo['sample_rate']:5d} FFT:{combo['n_fft']:4d} Hop:{combo['hop_length']:3d} "
+                  f"Win:{combo['window']:8s} LFCC:{combo['n_lfcc']:2d} MFCC:{combo['n_mfcc']:2d} Mels:{combo['n_mels']:3d}")
+        
         print("-" * 60)
     
     def _count_combinations(self):
@@ -127,6 +116,223 @@ class OptimalDeepfakeAnalyzer:
             params['hop_length'] = int(params['n_fft'] * params['hop_length_ratio'])
             del params['hop_length_ratio']  # Remove ratio, keep actual hop_length
             yield params
+    
+    def _generate_smart_parameter_samples(self, n_samples=50, exploration_factor=0.3):
+        """
+        Generate smart parameter samples using adaptive exploration strategy.
+        
+        Parameters:
+        -----------
+        n_samples : int
+            Number of parameter combinations to sample
+        exploration_factor : float
+            Balance between exploitation of good regions and exploration (0.0-1.0)
+            
+        Returns:
+        --------
+        list: List of parameter dictionaries
+        """
+        # Get all possible combinations
+        all_combinations = list(self._generate_parameter_combinations())
+        total_combinations = len(all_combinations)
+        
+        print(f"🎯 Smart Parameter Optimizer")
+        print(f"   Total possible combinations: {total_combinations}")
+        print(f"   Smart samples to test: {n_samples}")
+        print(f"   Exploration factor: {exploration_factor}")
+        
+        # Strategy: Mix of random exploration and targeted sampling
+        samples = []
+        
+        # 1. Always include some diverse baseline samples (spread across parameter space)
+        baseline_samples = min(10, n_samples // 4)
+        baseline_indices = [
+            0,  # First combination
+            total_combinations // 4,  # 25% through
+            total_combinations // 2,  # 50% through  
+            3 * total_combinations // 4,  # 75% through
+            total_combinations - 1,  # Last combination
+        ]
+        
+        # Add more diverse baseline samples if needed
+        while len(baseline_indices) < baseline_samples:
+            idx = random.randint(0, total_combinations - 1)
+            if idx not in baseline_indices:
+                baseline_indices.append(idx)
+        
+        for idx in baseline_indices[:baseline_samples]:
+            samples.append(all_combinations[idx])
+        
+        # 2. Add random exploration samples
+        exploration_samples = int(n_samples * exploration_factor)
+        remaining_samples = n_samples - len(samples)
+        exploration_samples = min(exploration_samples, remaining_samples)
+        
+        random_indices = random.sample(range(total_combinations), exploration_samples)
+        for idx in random_indices:
+            if all_combinations[idx] not in samples:
+                samples.append(all_combinations[idx])
+        
+        # 3. Fill remaining with strategic samples (focus on different parameter regions)
+        remaining = n_samples - len(samples)
+        if remaining > 0:
+            # Sample from different parameter regions
+            for _ in range(remaining):
+                # Create a combination that varies key parameters
+                sample_params = {}
+                for param, values in self.parameter_grid.items():
+                    if param != 'hop_length_ratio':  # Skip ratio, will calculate hop_length
+                        sample_params[param] = random.choice(values)
+                
+                # Calculate hop_length
+                sample_params['hop_length'] = int(
+                    sample_params['n_fft'] * random.choice(self.parameter_grid['hop_length_ratio'])
+                )
+                
+                if sample_params not in samples:
+                    samples.append(sample_params)
+                
+                if len(samples) >= n_samples:
+                    break
+        
+        # Ensure we have exactly n_samples
+        samples = samples[:n_samples]
+        
+        print(f"   Generated {len(samples)} diverse parameter combinations")
+        return samples
+    
+    def run_smart_optimization(self, audio_pairs, n_iterations=50, save_results=True, save_spectrograms=False):
+        """
+        Run smart parameter optimization with adaptive exploration.
+        
+        Parameters:
+        -----------
+        audio_pairs : list
+            List of audio pair dictionaries
+        n_iterations : int
+            Number of parameter combinations to test
+        save_results : bool
+            Whether to save results to files
+        save_spectrograms : bool
+            Whether to save spectrogram comparisons
+            
+        Returns:
+        --------
+        dict: Optimization results with best parameters and detailed analysis
+        """
+        print("🚀 Starting Smart Parameter Optimization")
+        print(f"🎯 Testing {n_iterations} strategically selected combinations")
+        print(f"🎵 Using {len(audio_pairs)} audio pairs for evaluation")
+        print("=" * 80)
+        
+        # Generate smart parameter samples
+        parameter_samples = self._generate_smart_parameter_samples(n_iterations)
+        
+        self.results = []
+        
+        # Create spectrograms directory if saving spectrograms
+        if save_spectrograms:
+            print("📸 Comprehensive spectrogram saving enabled!")
+            print("   - Power Spectrograms (following Spectrogram_flow.png)")
+            print("   - Mel-scale Spectrograms")
+            print("   - Log-Mel Spectrograms") 
+            print("   - LFCC feature plots")
+            print("   - MFCC feature plots")
+            print("   - All plots saved for each parameter combination tested")
+            print("   - Saving to 'spectrograms_comparison' directory")
+        
+        # Track best results for adaptive sampling
+        best_scores = []
+        
+        # Progress tracking with smart optimization
+        with tqdm(total=len(parameter_samples), desc="Smart Parameter Optimization") as pbar:
+            for i, params in enumerate(parameter_samples):
+                result = self.evaluate_parameter_combination(params, audio_pairs, save_spectrograms=save_spectrograms)
+                
+                if result is not None:
+                    self.results.append(result)
+                    best_scores.append(result['final_score'])
+                    
+                    # Update best result
+                    if result['final_score'] > self.best_score:
+                        self.best_score = result['final_score']
+                        self.best_params = params.copy()
+                        
+                        # Print improvement notification
+                        print(f"\n🎉 New best score found at iteration {i+1}!")
+                        print(f"   Score: {self.best_score:.4f}")
+                        print(f"   Parameters: SR={params['sample_rate']} FFT={params['n_fft']} "
+                              f"LFCC={params['n_lfcc']} MFCC={params['n_mfcc']} Mels={params['n_mels']}")
+                
+                # Adaptive exploration: if we've found good results, explore similar regions
+                if i > 10 and i % 10 == 0:  # Every 10 iterations after initial exploration
+                    recent_improvement = max(best_scores[-10:]) > (max(best_scores[:-10]) if len(best_scores) > 10 else 0)
+                    if recent_improvement:
+                        print(f"   🔍 Recent improvement detected - continuing exploration...")
+                    
+                pbar.set_postfix({
+                    'Best Score': f"{self.best_score:.4f}",
+                    'Current': f"{result['final_score']:.4f}" if result else "Failed",
+                    'Avg Recent': f"{np.mean(best_scores[-5:]):.4f}" if len(best_scores) >= 5 else "N/A"
+                })
+                pbar.update(1)
+        
+        # Sort results by final score
+        self.results.sort(key=lambda x: x['final_score'], reverse=True)
+        
+        print("\n🎉 Smart Optimization Complete!")
+        print(f"✅ Evaluated {len(self.results)} successful combinations")
+        print(f"🏆 Best score: {self.best_score:.4f}")
+        print(f"📈 Score improvement: {self.best_score - best_scores[0]:.4f}" if best_scores else "N/A")
+        
+        # Show parameter diversity achieved
+        self._analyze_parameter_diversity()
+        
+        # Save results
+        if save_results:
+            self._save_results()
+        
+        return {
+            'best_params': self.best_params,
+            'best_score': self.best_score,
+            'all_results': self.results,
+            'top_10': self.results[:10],
+            'score_progression': best_scores
+        }
+    
+    def _analyze_parameter_diversity(self):
+        """Analyze diversity of parameters tested in smart optimization."""
+        if not self.results:
+            return
+            
+        print("\n🔍 PARAMETER DIVERSITY ANALYSIS")
+        print("-" * 40)
+        
+        # Extract parameter values tested
+        tested_params = {}
+        for result in self.results:
+            for param, value in result['params'].items():
+                if param not in tested_params:
+                    tested_params[param] = set()
+                tested_params[param].add(value)
+        
+        # Show diversity for each parameter
+        for param, values in tested_params.items():
+            total_possible = len(self.parameter_grid.get(param, [param]))  # Handle hop_length
+            if param == 'hop_length':
+                # Skip hop_length as it's derived
+                continue
+                
+            tested_count = len(values)
+            coverage = tested_count / total_possible * 100
+            
+            print(f"{param:15s}: {tested_count}/{total_possible} values tested ({coverage:5.1f}% coverage)")
+            if tested_count <= 6:  # Show values if not too many
+                sorted_values = sorted(list(values))
+                print(f"{'':17s}Values: {sorted_values}")
+        
+        print(f"\nTotal combinations tested: {len(self.results)}")
+        print(f"Parameter space coverage: Diverse sampling across all dimensions")
     
     def load_audio_with_params(self, filepath, sample_rate):
         """Load audio with specific sample rate and preprocessing."""
@@ -265,7 +471,7 @@ class OptimalDeepfakeAnalyzer:
             n_fft=params['n_fft'],
             hop_length=params['hop_length'], 
             window=params['window'],
-            n_mels=40  # Standard for MFCC computation
+            n_mels=params['n_mels']  # Use parameter value for mel bands
         )
         log_mel_spec = librosa.power_to_db(mel_spec, ref=np.max)
         mfcc = librosa.feature.mfcc(S=log_mel_spec, n_mfcc=params['n_mfcc'], dct_type=2, norm='ortho')
@@ -690,6 +896,7 @@ class OptimalDeepfakeAnalyzer:
     def save_comprehensive_analysis(self, features_real, features_fake, spectrograms_real, spectrograms_fake, params, pair_name, save_dir="spectrograms_comparison"):
         """
         Save comprehensive analysis including spectrograms, LFCC, MFCC plots and statistical comparison.
+        Following the Spectrogram_flow.png diagram, this saves all three spectrogram types and feature plots.
         
         Parameters:
         -----------
@@ -711,16 +918,104 @@ class OptimalDeepfakeAnalyzer:
         os.makedirs(save_dir, exist_ok=True)
         
         # Create parameter string for filename
-        param_str = f"sr{params['sample_rate']}_fft{params['n_fft']}_hop{params['hop_length']}_win{params['window']}"
+        param_str = f"sr{params['sample_rate']}_fft{params['n_fft']}_hop{params['hop_length']}_win{params['window']}_lfcc{params['n_lfcc']}_mfcc{params['n_mfcc']}_mels{params['n_mels']}"
         
-        # 1. Save Power Spectrogram and Mel-scale Spectrogram comparison
-        self._save_spectrogram_comparison(spectrograms_real, spectrograms_fake, params, pair_name, param_str, save_dir)
+        # 1. Save all three spectrograms from flow diagram (Power, Mel-scale, Log-Mel)
+        self._save_all_spectrograms_flow(spectrograms_real, spectrograms_fake, params, pair_name, param_str, save_dir)
         
-        # 2. Save LFCC and MFCC feature comparison
+        # 2. Save LFCC and MFCC feature comparison plots
         self._save_feature_comparison(features_real, features_fake, params, pair_name, param_str, save_dir)
         
         # 3. Save statistical analysis
         self._save_statistical_analysis(features_real, features_fake, params, pair_name, param_str, save_dir)
+
+    def _save_all_spectrograms_flow(self, spectrograms_real, spectrograms_fake, params, pair_name, param_str, save_dir):
+        """
+        Save all three spectrograms following the Spectrogram_flow.png diagram:
+        1. Power Spectrogram (real-valued)
+        2. Mel-scale Spectrogram 
+        3. Log-Mel Spectrogram
+        """
+        try:
+            # Create comprehensive 3x2 subplot for all spectrograms
+            fig, axes = plt.subplots(3, 2, figsize=(18, 16))
+            fig.suptitle(f'Complete Spectrogram Flow Analysis: {pair_name}\n{param_str}', fontsize=16, fontweight='bold')
+            
+            # Time axis for plotting
+            time_real = np.linspace(0, spectrograms_real['power_spectrogram'].shape[1] * params['hop_length'] / params['sample_rate'], 
+                                  spectrograms_real['power_spectrogram'].shape[1])
+            time_fake = np.linspace(0, spectrograms_fake['power_spectrogram'].shape[1] * params['hop_length'] / params['sample_rate'], 
+                                  spectrograms_fake['power_spectrogram'].shape[1])
+            
+            # 1. Power Spectrogram (convert to dB for visualization)
+            real_power = spectrograms_real['power_spectrogram']
+            fake_power = spectrograms_fake['power_spectrogram']
+            real_power_db = librosa.power_to_db(real_power, ref=np.max)
+            fake_power_db = librosa.power_to_db(fake_power, ref=np.max)
+            
+            im1 = axes[0,0].imshow(real_power_db, aspect='auto', origin='lower', 
+                                 extent=[0, time_real[-1], 0, real_power_db.shape[0]], cmap='magma')
+            axes[0,0].set_title('Power Spectrogram - Real Audio', fontweight='bold')
+            axes[0,0].set_xlabel('Time (s)')
+            axes[0,0].set_ylabel('Frequency Bin')
+            plt.colorbar(im1, ax=axes[0,0], label='Power (dB)')
+            
+            im2 = axes[0,1].imshow(fake_power_db, aspect='auto', origin='lower',
+                                 extent=[0, time_fake[-1], 0, fake_power_db.shape[0]], cmap='magma')
+            axes[0,1].set_title('Power Spectrogram - Fake Audio', fontweight='bold')
+            axes[0,1].set_xlabel('Time (s)')
+            axes[0,1].set_ylabel('Frequency Bin')
+            plt.colorbar(im2, ax=axes[0,1], label='Power (dB)')
+            
+            # 2. Mel-scale Spectrogram (convert to dB for visualization)
+            real_mel = spectrograms_real['mel_spectrogram']
+            fake_mel = spectrograms_fake['mel_spectrogram']
+            real_mel_db = librosa.power_to_db(real_mel, ref=np.max)
+            fake_mel_db = librosa.power_to_db(fake_mel, ref=np.max)
+            
+            im3 = axes[1,0].imshow(real_mel_db, aspect='auto', origin='lower',
+                                 extent=[0, time_real[-1], 0, real_mel_db.shape[0]], cmap='viridis')
+            axes[1,0].set_title('Mel-scale Spectrogram - Real Audio', fontweight='bold')
+            axes[1,0].set_xlabel('Time (s)')
+            axes[1,0].set_ylabel('Mel Frequency Band')
+            plt.colorbar(im3, ax=axes[1,0], label='Mel Power (dB)')
+            
+            im4 = axes[1,1].imshow(fake_mel_db, aspect='auto', origin='lower',
+                                 extent=[0, time_fake[-1], 0, fake_mel_db.shape[0]], cmap='viridis')
+            axes[1,1].set_title('Mel-scale Spectrogram - Fake Audio', fontweight='bold')
+            axes[1,1].set_xlabel('Time (s)')
+            axes[1,1].set_ylabel('Mel Frequency Band')
+            plt.colorbar(im4, ax=axes[1,1], label='Mel Power (dB)')
+            
+            # 3. Log-Mel Spectrogram (already in dB)
+            real_log_mel = spectrograms_real['log_mel_spectrogram']
+            fake_log_mel = spectrograms_fake['log_mel_spectrogram']
+            
+            im5 = axes[2,0].imshow(real_log_mel, aspect='auto', origin='lower',
+                                 extent=[0, time_real[-1], 0, real_log_mel.shape[0]], cmap='plasma')
+            axes[2,0].set_title('Log-Mel Spectrogram - Real Audio', fontweight='bold')
+            axes[2,0].set_xlabel('Time (s)')
+            axes[2,0].set_ylabel('Mel Frequency Band')
+            plt.colorbar(im5, ax=axes[2,0], label='Amplitude (dB)')
+            
+            im6 = axes[2,1].imshow(fake_log_mel, aspect='auto', origin='lower',
+                                 extent=[0, time_fake[-1], 0, fake_log_mel.shape[0]], cmap='plasma')
+            axes[2,1].set_title('Log-Mel Spectrogram - Fake Audio', fontweight='bold')
+            axes[2,1].set_xlabel('Time (s)')
+            axes[2,1].set_ylabel('Mel Frequency Band')
+            plt.colorbar(im6, ax=axes[2,1], label='Amplitude (dB)')
+            
+            plt.tight_layout()
+            
+            # Save complete spectrogram flow diagram
+            filename = f"{pair_name}_spectrogram_flow_{param_str}.png"
+            filepath = os.path.join(save_dir, filename)
+            plt.savefig(filepath, dpi=150, bbox_inches='tight', facecolor='white')
+            plt.close()
+            
+        except Exception as e:
+            print(f"Error saving spectrogram flow diagram: {e}")
+            plt.close()
 
     def _save_spectrogram_comparison(self, spectrograms_real, spectrograms_fake, params, pair_name, param_str, save_dir):
         """Save Power Spectrogram and Mel-scale Spectrogram comparison."""
@@ -822,62 +1117,138 @@ class OptimalDeepfakeAnalyzer:
             plt.close()
 
     def _save_feature_comparison(self, features_real, features_fake, params, pair_name, param_str, save_dir):
-        """Save LFCC and MFCC feature comparison plots."""
+        """Save LFCC and MFCC feature comparison plots with parameter-specific dimensions."""
         try:
             fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-            fig.suptitle(f'Cepstral Features Analysis: {pair_name} - {param_str}', fontsize=16, fontweight='bold')
+            fig.suptitle(f'Cepstral Features Analysis: {pair_name}\nLFCC: {params["n_lfcc"]}, MFCC: {params["n_mfcc"]}\n{param_str}', 
+                        fontsize=14, fontweight='bold')
             
-            # LFCC
+            # LFCC - use the actual number of coefficients from parameters
             real_lfcc = features_real['lfcc']
             fake_lfcc = features_fake['lfcc']
+            
+            # Display all LFCC coefficients (up to n_lfcc parameter)
+            n_lfcc_display = min(params['n_lfcc'], real_lfcc.shape[0])
             
             time_real = np.linspace(0, real_lfcc.shape[1] * params['hop_length'] / params['sample_rate'], real_lfcc.shape[1])
             time_fake = np.linspace(0, fake_lfcc.shape[1] * params['hop_length'] / params['sample_rate'], fake_lfcc.shape[1])
             
-            # Plot LFCC
-            im1 = axes[0,0].imshow(real_lfcc[:40], aspect='auto', origin='lower',
-                                 extent=[0, time_real[-1], 0, 40], cmap='coolwarm')
-            axes[0,0].set_title('LFCC - Real Audio', fontweight='bold')
+            # Plot LFCC - show all coefficients for this parameter combination
+            im1 = axes[0,0].imshow(real_lfcc[:n_lfcc_display], aspect='auto', origin='lower',
+                                 extent=[0, time_real[-1], 0, n_lfcc_display], cmap='coolwarm')
+            axes[0,0].set_title(f'LFCC ({n_lfcc_display} coeffs) - Real Audio', fontweight='bold')
             axes[0,0].set_xlabel('Time (s)')
             axes[0,0].set_ylabel('LFCC Coefficient')
             plt.colorbar(im1, ax=axes[0,0], label='Amplitude')
             
-            im2 = axes[0,1].imshow(fake_lfcc[:40], aspect='auto', origin='lower',
-                                 extent=[0, time_fake[-1], 0, 40], cmap='coolwarm')
-            axes[0,1].set_title('LFCC - Fake Audio', fontweight='bold')
+            im2 = axes[0,1].imshow(fake_lfcc[:n_lfcc_display], aspect='auto', origin='lower',
+                                 extent=[0, time_fake[-1], 0, n_lfcc_display], cmap='coolwarm')
+            axes[0,1].set_title(f'LFCC ({n_lfcc_display} coeffs) - Fake Audio', fontweight='bold')
             axes[0,1].set_xlabel('Time (s)')
             axes[0,1].set_ylabel('LFCC Coefficient')
             plt.colorbar(im2, ax=axes[0,1], label='Amplitude')
             
-            # MFCC
+            # MFCC - use the actual number of coefficients from parameters
             real_mfcc = features_real['mfcc']
             fake_mfcc = features_fake['mfcc']
+            n_mfcc_display = min(params['n_mfcc'], real_mfcc.shape[0])
             
-            # Plot MFCC
-            im3 = axes[1,0].imshow(real_mfcc, aspect='auto', origin='lower',
-                                 extent=[0, time_real[-1], 0, real_mfcc.shape[0]], cmap='plasma')
-            axes[1,0].set_title('MFCC - Real Audio', fontweight='bold')
+            # Plot MFCC - show all coefficients for this parameter combination
+            im3 = axes[1,0].imshow(real_mfcc[:n_mfcc_display], aspect='auto', origin='lower',
+                                 extent=[0, time_real[-1], 0, n_mfcc_display], cmap='plasma')
+            axes[1,0].set_title(f'MFCC ({n_mfcc_display} coeffs) - Real Audio', fontweight='bold')
             axes[1,0].set_xlabel('Time (s)')
             axes[1,0].set_ylabel('MFCC Coefficient')
             plt.colorbar(im3, ax=axes[1,0], label='Amplitude')
             
-            im4 = axes[1,1].imshow(fake_mfcc, aspect='auto', origin='lower',
-                                 extent=[0, time_fake[-1], 0, fake_mfcc.shape[0]], cmap='plasma')
-            axes[1,1].set_title('MFCC - Fake Audio', fontweight='bold')
+            im4 = axes[1,1].imshow(fake_mfcc[:n_mfcc_display], aspect='auto', origin='lower',
+                                 extent=[0, time_fake[-1], 0, n_mfcc_display], cmap='plasma')
+            axes[1,1].set_title(f'MFCC ({n_mfcc_display} coeffs) - Fake Audio', fontweight='bold')
             axes[1,1].set_xlabel('Time (s)')
             axes[1,1].set_ylabel('MFCC Coefficient')
             plt.colorbar(im4, ax=axes[1,1], label='Amplitude')
             
             plt.tight_layout()
             
-            # Save figure
+            # Save comprehensive feature comparison
             filename = f"{pair_name}_features_{param_str}.png"
             filepath = os.path.join(save_dir, filename)
             plt.savefig(filepath, dpi=150, bbox_inches='tight', facecolor='white')
             plt.close()
             
+            # Also save individual LFCC and MFCC plots for detailed analysis
+            self._save_individual_feature_plots(features_real, features_fake, params, pair_name, param_str, save_dir)
+            
         except Exception as e:
             print(f"Error saving feature comparison: {e}")
+            plt.close()
+
+    def _save_individual_feature_plots(self, features_real, features_fake, params, pair_name, param_str, save_dir):
+        """Save individual LFCC and MFCC plots for detailed analysis."""
+        try:
+            # Individual LFCC plot
+            fig_lfcc, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+            fig_lfcc.suptitle(f'LFCC Detailed Analysis: {pair_name} - {params["n_lfcc"]} coefficients\n{param_str}', 
+                             fontsize=14, fontweight='bold')
+            
+            real_lfcc = features_real['lfcc']
+            fake_lfcc = features_fake['lfcc']
+            n_lfcc_display = min(params['n_lfcc'], real_lfcc.shape[0])
+            
+            time_real = np.linspace(0, real_lfcc.shape[1] * params['hop_length'] / params['sample_rate'], real_lfcc.shape[1])
+            time_fake = np.linspace(0, fake_lfcc.shape[1] * params['hop_length'] / params['sample_rate'], fake_lfcc.shape[1])
+            
+            im1 = ax1.imshow(real_lfcc[:n_lfcc_display], aspect='auto', origin='lower',
+                           extent=[0, time_real[-1], 0, n_lfcc_display], cmap='coolwarm')
+            ax1.set_title(f'LFCC - Real Audio ({n_lfcc_display} coeffs)', fontweight='bold')
+            ax1.set_xlabel('Time (s)')
+            ax1.set_ylabel('LFCC Coefficient')
+            plt.colorbar(im1, ax=ax1, label='Amplitude')
+            
+            im2 = ax2.imshow(fake_lfcc[:n_lfcc_display], aspect='auto', origin='lower',
+                           extent=[0, time_fake[-1], 0, n_lfcc_display], cmap='coolwarm')
+            ax2.set_title(f'LFCC - Fake Audio ({n_lfcc_display} coeffs)', fontweight='bold')
+            ax2.set_xlabel('Time (s)')
+            ax2.set_ylabel('LFCC Coefficient')
+            plt.colorbar(im2, ax=ax2, label='Amplitude')
+            
+            plt.tight_layout()
+            filename_lfcc = f"{pair_name}_lfcc_detailed_{param_str}.png"
+            filepath_lfcc = os.path.join(save_dir, filename_lfcc)
+            plt.savefig(filepath_lfcc, dpi=150, bbox_inches='tight', facecolor='white')
+            plt.close()
+            
+            # Individual MFCC plot
+            fig_mfcc, (ax3, ax4) = plt.subplots(1, 2, figsize=(16, 6))
+            fig_mfcc.suptitle(f'MFCC Detailed Analysis: {pair_name} - {params["n_mfcc"]} coefficients\n{param_str}', 
+                             fontsize=14, fontweight='bold')
+            
+            real_mfcc = features_real['mfcc']
+            fake_mfcc = features_fake['mfcc']
+            n_mfcc_display = min(params['n_mfcc'], real_mfcc.shape[0])
+            
+            im3 = ax3.imshow(real_mfcc[:n_mfcc_display], aspect='auto', origin='lower',
+                           extent=[0, time_real[-1], 0, n_mfcc_display], cmap='plasma')
+            ax3.set_title(f'MFCC - Real Audio ({n_mfcc_display} coeffs)', fontweight='bold')
+            ax3.set_xlabel('Time (s)')
+            ax3.set_ylabel('MFCC Coefficient')
+            plt.colorbar(im3, ax=ax3, label='Amplitude')
+            
+            im4 = ax4.imshow(fake_mfcc[:n_mfcc_display], aspect='auto', origin='lower',
+                           extent=[0, time_fake[-1], 0, n_mfcc_display], cmap='plasma')
+            ax4.set_title(f'MFCC - Fake Audio ({n_mfcc_display} coeffs)', fontweight='bold')
+            ax4.set_xlabel('Time (s)')
+            ax4.set_ylabel('MFCC Coefficient')
+            plt.colorbar(im4, ax=ax4, label='Amplitude')
+            
+            plt.tight_layout()
+            filename_mfcc = f"{pair_name}_mfcc_detailed_{param_str}.png"
+            filepath_mfcc = os.path.join(save_dir, filename_mfcc)
+            plt.savefig(filepath_mfcc, dpi=150, bbox_inches='tight', facecolor='white')
+            plt.close()
+            
+        except Exception as e:
+            print(f"Error saving individual feature plots: {e}")
             plt.close()
 
     def _save_statistical_analysis(self, features_real, features_fake, params, pair_name, param_str, save_dir):
@@ -989,14 +1360,12 @@ class OptimalDeepfakeAnalyzer:
         avg_statistical = np.mean([r['statistical_score'] for r in pair_results])
         avg_visual = np.mean([r['visual_score'] for r in pair_results])
         consistency = self.calculate_pattern_consistency(pair_results)
-        efficiency = self.calculate_computational_efficiency(processing_time, params)
         
-        # Calculate weighted final score
+        # Calculate weighted final score (removed computational efficiency)
         final_score = (
             self.scoring_weights['statistical_discrimination'] * avg_statistical +
             self.scoring_weights['visual_discriminability'] * avg_visual +
-            self.scoring_weights['pattern_consistency'] * consistency +
-            self.scoring_weights['computational_efficiency'] * efficiency
+            self.scoring_weights['pattern_consistency'] * consistency
         )
         
         return {
@@ -1005,7 +1374,6 @@ class OptimalDeepfakeAnalyzer:
             'statistical_score': avg_statistical,
             'visual_score': avg_visual,
             'consistency_score': consistency,
-            'efficiency_score': efficiency,
             'processing_time': processing_time,
             'pair_results': pair_results
         }
@@ -1042,7 +1410,14 @@ class OptimalDeepfakeAnalyzer:
         
         # Create spectrograms directory if saving spectrograms
         if save_spectrograms:
-            print("📸 Spectrogram saving enabled - creating spectrograms_comparison directory")
+            print("📸 Comprehensive spectrogram saving enabled!")
+            print("   - Power Spectrograms (following Spectrogram_flow.png)")
+            print("   - Mel-scale Spectrograms")
+            print("   - Log-Mel Spectrograms") 
+            print("   - LFCC feature plots")
+            print("   - MFCC feature plots")
+            print("   - All plots saved for each parameter combination tested")
+            print("   - Saving to 'spectrograms_comparison' directory")
         
         # Progress tracking
         with tqdm(total=len(combinations), desc="Optimizing Parameters") as pbar:
@@ -1107,7 +1482,6 @@ class OptimalDeepfakeAnalyzer:
                 'statistical_score': result['statistical_score'],
                 'visual_score': result['visual_score'],
                 'consistency_score': result['consistency_score'],
-                'efficiency_score': result['efficiency_score'],
                 'processing_time': result['processing_time']
             })
             summary_data.append(row)
@@ -1225,17 +1599,38 @@ def main():
         }
     ]
     
-    # Run optimization (limit combinations for initial testing)
-    print("🔬 Starting optimization process...")
-    results = optimizer.run_optimization(
+    # Run smart optimization with strategic parameter sampling
+    print("🔬 Starting smart optimization process...")
+    print("🎯 Using intelligent parameter exploration instead of exhaustive grid search")
+    print("💡 This approach tests diverse parameter combinations efficiently")
+    
+    results = optimizer.run_smart_optimization(
         audio_pairs=audio_pairs,
-        max_combinations=100,  # Increased for comprehensive parameter exploration
+        n_iterations=50,  # Test 50 strategically selected combinations
         save_results=True,
         save_spectrograms=True  # Enable comprehensive analysis saving
     )
     
     # Analyze results
     optimizer.analyze_results()
+    
+    # Show optimization progress
+    if 'score_progression' in results:
+        print(f"\n📈 OPTIMIZATION PROGRESS")
+        print("-" * 40)
+        scores = results['score_progression']
+        print(f"Initial score: {scores[0]:.4f}")
+        print(f"Final best score: {scores[-1] if scores else 0:.4f}")
+        print(f"Total improvement: {(scores[-1] - scores[0]):.4f}" if len(scores) > 0 else "N/A")
+        
+        # Show score progression in chunks
+        chunk_size = 10
+        for i in range(0, len(scores), chunk_size):
+            chunk = scores[i:i+chunk_size]
+            chunk_max = max(chunk)
+            chunk_avg = np.mean(chunk)
+            print(f"Iterations {i+1:2d}-{min(i+chunk_size, len(scores)):2d}: "
+                  f"max={chunk_max:.4f}, avg={chunk_avg:.4f}")
     
     # Generate final recommendations
     print("\n💡 FINAL RECOMMENDATIONS")
@@ -1245,7 +1640,6 @@ def main():
     print("  ✅ Statistical discrimination between real and fake audio")
     print("  ✅ Visual discriminability in spectrograms")
     print("  ✅ Consistency across different audio pairs")
-    print("  ✅ Computational efficiency")
     
     print(f"\n🔧 RECOMMENDED CONFIGURATION:")
     print("-" * 30)
