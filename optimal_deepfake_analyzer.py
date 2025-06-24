@@ -83,12 +83,12 @@ class OptimalDeepfakeAnalyzer:
         # -------------------------------------------------------------
         self.parameter_grid = {
             'sample_rate': [16000, 22050, 44100, 48000],
-            'n_fft': [512, 1024, 2048, 4096],
-            'hop_length_ratio': [0.25, 0.5, 0.75],  # Ratio of n_fft
-            'window': ['hann', 'hamming', 'blackman'],
-            'n_lfcc': [40, 60, 80],
-            'n_mfcc': [13, 20, 26],
-            'n_mels': [40, 80, 128]
+            'n_fft': [512, 1024, 2048, 4096, 8192],
+            'hop_length_ratio': [0.125, 0.25, 0.5, 0.75],  # Ratio of n_fft
+            'window': ['hann', 'hamming', 'blackman', 'bartlett'],
+            'n_lfcc': [20, 40, 60, 80, 100],
+            'n_mfcc': [13, 20, 26, 39],
+            'n_mels': [40, 64, 80, 128, 256]
         }
         
         # Scoring weights for multi-objective optimization
@@ -1229,7 +1229,7 @@ def main():
     print("🔬 Starting optimization process...")
     results = optimizer.run_optimization(
         audio_pairs=audio_pairs,
-        max_combinations=5,  # Reduced for comprehensive analysis generation
+        max_combinations=100,  # Increased for comprehensive parameter exploration
         save_results=True,
         save_spectrograms=True  # Enable comprehensive analysis saving
     )
